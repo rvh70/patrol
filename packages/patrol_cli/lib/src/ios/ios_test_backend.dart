@@ -77,6 +77,10 @@ class IOSTestBackend {
   static const _envInitialBackoffMs = 'PATROL_IOS_DEVELOP_INITIAL_BACKOFF_MS';
   static const _defaultInitialBackoffMs = 2000;
 
+  // Exponential backoff configuration
+  static const _backoffMultiplier = 1.5;
+  static const _maxBackoffMs = 30000; // 30 seconds
+
   final ProcessManager _processManager;
   final Platform _platform;
   final FileSystem _fs;
@@ -278,18 +282,18 @@ class IOSTestBackend {
     while (attemptCount <= maxRestarts) {
       try {
         attemptCount++;
-        
+
         if (attemptCount > 1) {
           _logger.warn(
             'Restarting iOS test runner (attempt $attemptCount/${maxRestarts + 1})',
           );
           _logger.detail('Waiting ${currentBackoffMs}ms before restart...');
           await Future<void>.delayed(Duration(milliseconds: currentBackoffMs));
-          
-          // Exponential backoff with cap at 30 seconds
-          currentBackoffMs = (currentBackoffMs * 1.5).toInt();
-          if (currentBackoffMs > 30000) {
-            currentBackoffMs = 30000;
+
+          // Exponential backoff with cap
+          currentBackoffMs = (currentBackoffMs * _backoffMultiplier).toInt();
+          if (currentBackoffMs > _maxBackoffMs) {
+            currentBackoffMs = _maxBackoffMs;
           }
         } else {
           _logger.detail(
@@ -317,7 +321,7 @@ class IOSTestBackend {
           _logger.err('Error: $e');
           rethrow;
         }
-        
+
         _logger.warn(
           'iOS test runner exited unexpectedly: $e',
         );
@@ -390,7 +394,7 @@ class IOSTestBackend {
               workingDirectory: _rootDirectory.childDirectory('ios').path,
             )
             ..disposedBy(_disposeScope);
-      
+
       // Capture stdout for error detection
       process.listenStdOut((l) {
         _logger.detail('\t$l');
