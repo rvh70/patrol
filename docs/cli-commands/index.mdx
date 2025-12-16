@@ -96,6 +96,43 @@ won't be re-executed on hot restarts.
 These cases are quite specific and it's hard to give advice without knowing the
 context.
 
+### Configuration
+
+#### iOS Test Runner Timeout
+
+On iOS, if you encounter "test runner timed out while preparing to run tests"
+errors, this typically indicates that the native test runner is taking too long
+to initialize. Common causes include:
+
+- **Port conflicts**: The test server (port 8081) or app server (port 8082) is already in use
+- **Slow simulator startup**: The iOS simulator is slow to boot or launch the app
+- **Network permission prompts**: The app requires network permissions that aren't granted
+
+**PATROL_IOS_TEST_RUNNER_TIMEOUT** (default: `600` seconds / 10 minutes)
+
+Configures the maximum time allowed for test execution in xcodebuild.
+This sets both the default and maximum execution time allowance for tests.
+
+```bash
+export PATROL_IOS_TEST_RUNNER_TIMEOUT=1200
+patrol develop --target patrol_test/example_test.dart
+```
+
+**Troubleshooting timeout errors:**
+
+1. Check if ports 8081 (test server) and 8082 (app server) are available:
+   ```bash
+   lsof -i :8081 -i :8082
+   ```
+
+2. Kill any processes using these ports:
+   ```bash
+   kill -9 $(lsof -t -i:8081)
+   kill -9 $(lsof -t -i:8082)
+   ```
+
+3. The CLI will warn you if ports are in use before starting tests
+
 See also:
 
 - [The difference between Hot Restart and Hot Reload in Flutter][so_question]

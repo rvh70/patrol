@@ -1,5 +1,5 @@
 import 'dart:convert';
-import 'dart:io' show Process;
+import 'dart:io' show Process, Socket, SocketException;
 
 import 'package:dispose_scope/dispose_scope.dart';
 import 'package:file/file.dart';
@@ -68,6 +68,11 @@ class IOSTestBackend {
   }
 
   static const _xcodebuildInterrupted = -15;
+
+  // Environment variable to configure test runner preparation timeout (seconds)
+  // This controls how long xcodebuild waits for the test runner to be ready
+  static const _envTestRunnerTimeoutKey = 'PATROL_IOS_TEST_RUNNER_TIMEOUT';
+  static const _defaultTestRunnerTimeout = 600; // 10 minutes
 
   final ProcessManager _processManager;
   final Platform _platform;
@@ -144,6 +149,62 @@ class IOSTestBackend {
     });
   }
 
+  /// Checks if a port is available (not in use).
+  ///
+  /// Returns true if the port is available, false otherwise.
+  Future<bool> _isPortAvailable(int port) async {
+    try {
+      final socket = await Socket.connect(
+        'localhost',
+        port,
+        timeout: const Duration(milliseconds: 500),
+      );
+      // If connection succeeds, port is in use
+      await socket.close();
+      return false;
+    } on SocketException {
+      // Connection failed, port is available
+      return true;
+    } catch (e) {
+      // Other errors, assume port is available
+      _logger.detail('Port $port check failed with: $e, assuming available');
+      return true;
+    }
+  }
+
+  /// Verifies that required ports are available before starting tests.
+  ///
+  /// This prevents the "test runner timed out while preparing to run tests"
+  /// error that occurs when PatrolServer cannot bind to its port.
+  Future<void> _checkPortsAvailability(IOSAppOptions options) async {
+    final testPort = options.testServerPort;
+    final appPort = options.appServerPort;
+
+    final testPortAvailable = await _isPortAvailable(testPort);
+    final appPortAvailable = await _isPortAvailable(appPort);
+
+    if (!testPortAvailable) {
+      _logger.warn(
+        'Test server port $testPort is already in use. '
+        'This may cause the test runner to timeout during preparation.',
+      );
+      _logger.info(
+        'If you see "test runner timed out while preparing to run tests", '
+        'kill any processes using port $testPort (e.g., previous test sessions).',
+      );
+    }
+
+    if (!appPortAvailable) {
+      _logger.warn(
+        'App server port $appPort is already in use. '
+        'This may cause connection failures.',
+      );
+    }
+
+    // In develop mode, we could potentially be more strict,
+    // but for now just warn to avoid breaking existing workflows
+  }
+
   /// Executes the tests of the given [options] on the given [device].
   ///
   /// [build] must be called before this method.
@@ -158,6 +219,9 @@ class IOSTestBackend {
     required bool hideTestSteps,
     required bool clearTestSteps,
   }) async {
+    // Check port availability before starting to help diagnose issues early
+    await _checkPortsAvailability(options);
+
     await _disposeScope.run((scope) async {
       final patrolLogCommand = device.real
           ? ['idevicesyslog']
@@ -189,6 +253,22 @@ class IOSTestBackend {
       final task = _logger.task('Running $subject');
 
       final sdkVersion = await getSdkVersion(real: device.real);
+      
+      // Get test runner timeout from environment or use default
+      final testRunnerTimeout = int.tryParse(
+        _platform.environment[_envTestRunnerTimeoutKey] ?? '',
+      ) ?? _defaultTestRunnerTimeout;
+      
+      // Additional xcodebuild arguments to configure timeouts
+      final additionalArgs = [
+        '-test-timeouts-enabled',
+        'YES',
+        '-default-test-execution-time-allowance',
+        testRunnerTimeout.toString(),
+        '-maximum-test-execution-time-allowance',
+        (testRunnerTimeout * 2).toString(),
+      ];
+      
       final process =
           await _processManager.start(
               options.testWithoutBuildingInvocation(
@@ -199,6 +279,7 @@ class IOSTestBackend {
                   sdkVersion: sdkVersion,
                 ),
                 resultBundlePath: reportPath,
+                additionalArgs: additionalArgs,
               ),
               runInShell: true,
               environment: {

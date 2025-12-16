@@ -277,6 +277,7 @@ class IOSAppOptions {
     Device device, {
     required String xcTestRunPath,
     required String resultBundlePath,
+    List<String> additionalArgs = const [],
   }) {
     final cmd = [
       ...['xcodebuild', 'test-without-building'],
@@ -288,6 +289,7 @@ class IOSAppOptions {
       ],
       ...['-destination-timeout', '1'],
       ...['-resultBundlePath', resultBundlePath],
+      ...additionalArgs,
     ];
 
     return cmd;
