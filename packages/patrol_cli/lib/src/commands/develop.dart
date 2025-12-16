@@ -393,10 +393,9 @@ class DevelopCommand extends PatrolCommand {
             _macosTestBackend.execute(macos, device, interruptible: true);
       case TargetPlatform.iOS:
         appId = iosOpts.bundleId;
-        action = () => _iosTestBackend.execute(
+        action = () => _iosTestBackend.executeDevelop(
           iosOpts,
           device,
-          interruptible: true,
           showFlutterLogs: showFlutterLogs,
           hideTestSteps: hideTestSteps,
           clearTestSteps: clearTestSteps,

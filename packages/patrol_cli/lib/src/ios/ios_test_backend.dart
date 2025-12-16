@@ -69,6 +69,14 @@ class IOSTestBackend {
 
   static const _xcodebuildInterrupted = -15;
 
+  // Environment variable to configure max restart attempts in develop mode
+  static const _envMaxRestartAttempts = 'PATROL_IOS_DEVELOP_MAX_RESTARTS';
+  static const _defaultMaxRestartAttempts = 10;
+
+  // Environment variable to configure initial backoff delay in milliseconds
+  static const _envInitialBackoffMs = 'PATROL_IOS_DEVELOP_INITIAL_BACKOFF_MS';
+  static const _defaultInitialBackoffMs = 2000;
+
   final ProcessManager _processManager;
   final Platform _platform;
   final FileSystem _fs;
@@ -234,6 +242,192 @@ class IOSTestBackend {
         final cause = 'xcodebuild exited with code $exitCode';
         task.fail('Failed to execute tests of $subject ($cause)');
         throwToolExit(cause);
+      }
+    });
+  }
+
+  /// Executes tests in develop mode with automatic restart on failure.
+  ///
+  /// This method wraps [execute] and adds restart logic specifically for
+  /// `patrol develop` mode. If the xcodebuild process exits with an error
+  /// (such as "test runner timed out"), it will automatically restart the
+  /// test runner to keep the develop session alive.
+  ///
+  /// The number of restart attempts and backoff delay can be configured via
+  /// environment variables:
+  /// - PATROL_IOS_DEVELOP_MAX_RESTARTS (default: 10)
+  /// - PATROL_IOS_DEVELOP_INITIAL_BACKOFF_MS (default: 2000)
+  Future<void> executeDevelop(
+    IOSAppOptions options,
+    Device device, {
+    required bool showFlutterLogs,
+    required bool hideTestSteps,
+    required bool clearTestSteps,
+  }) async {
+    final maxRestarts = int.tryParse(
+      _platform.environment[_envMaxRestartAttempts] ?? '',
+    ) ?? _defaultMaxRestartAttempts;
+
+    final initialBackoffMs = int.tryParse(
+      _platform.environment[_envInitialBackoffMs] ?? '',
+    ) ?? _defaultInitialBackoffMs;
+
+    var attemptCount = 0;
+    var currentBackoffMs = initialBackoffMs;
+
+    while (attemptCount <= maxRestarts) {
+      try {
+        attemptCount++;
+        
+        if (attemptCount > 1) {
+          _logger.warn(
+            'Restarting iOS test runner (attempt $attemptCount/${maxRestarts + 1})',
+          );
+          _logger.detail('Waiting ${currentBackoffMs}ms before restart...');
+          await Future<void>.delayed(Duration(milliseconds: currentBackoffMs));
+          
+          // Exponential backoff with cap at 30 seconds
+          currentBackoffMs = (currentBackoffMs * 1.5).toInt();
+          if (currentBackoffMs > 30000) {
+            currentBackoffMs = 30000;
+          }
+        } else {
+          _logger.detail(
+            'Starting iOS test runner in develop mode '
+            '(max restarts: $maxRestarts, initial backoff: ${initialBackoffMs}ms)',
+          );
+        }
+
+        await _executeWithErrorCapture(
+          options,
+          device,
+          showFlutterLogs: showFlutterLogs,
+          hideTestSteps: hideTestSteps,
+          clearTestSteps: clearTestSteps,
+        );
+
+        // If we reach here, the session completed successfully or was interrupted
+        _logger.detail('iOS test runner session ended');
+        break;
+      } catch (e) {
+        if (attemptCount > maxRestarts) {
+          _logger.err(
+            'iOS test runner failed after $attemptCount attempts. Giving up.',
+          );
+          _logger.err('Error: $e');
+          rethrow;
+        }
+        
+        _logger.warn(
+          'iOS test runner exited unexpectedly: $e',
+        );
+        _logger.info(
+          'Will attempt to restart (attempt ${attemptCount + 1}/${maxRestarts + 1})',
+        );
+      }
+    }
+  }
+
+  /// Internal helper that executes tests and captures errors for restart logic.
+  Future<void> _executeWithErrorCapture(
+    IOSAppOptions options,
+    Device device, {
+    required bool showFlutterLogs,
+    required bool hideTestSteps,
+    required bool clearTestSteps,
+  }) async {
+    final errorMessages = <String>[];
+    
+    await _disposeScope.run((scope) async {
+      final patrolLogCommand = device.real
+          ? ['idevicesyslog']
+          : ['log', 'stream'];
+
+      // Read patrol logs from log stream
+      final processLogs =
+          await _processManager.start(patrolLogCommand, runInShell: true)
+            ..disposedBy(scope);
+
+      final reportPath = resultBundlePath(
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+      );
+
+      final patrolLogReader =
+          PatrolLogReader(
+              listenStdOut: processLogs.listenStdOut,
+              scope: scope,
+              log: _logger.info,
+              reportPath: reportPath,
+              showFlutterLogs: showFlutterLogs,
+              hideTestSteps: hideTestSteps,
+              clearTestSteps: clearTestSteps,
+            )
+            ..listen()
+            ..startTimer();
+
+      final subject = '${options.description} on ${device.description}';
+      final task = _logger.task('Running $subject');
+
+      final sdkVersion = await getSdkVersion(real: device.real);
+      final process =
+          await _processManager.start(
+              options.testWithoutBuildingInvocation(
+                device,
+                xcTestRunPath: await xcTestRunPath(
+                  real: device.real,
+                  scheme: options.scheme,
+                  sdkVersion: sdkVersion,
+                ),
+                resultBundlePath: reportPath,
+              ),
+              runInShell: true,
+              environment: {
+                ..._platform.environment,
+                'TEST_RUNNER_PATROL_TEST_PORT': options.testServerPort
+                    .toString(),
+                'TEST_RUNNER_PATROL_APP_PORT': options.appServerPort.toString(),
+              },
+              workingDirectory: _rootDirectory.childDirectory('ios').path,
+            )
+            ..disposedBy(_disposeScope);
+      
+      // Capture stdout for error detection
+      process.listenStdOut((l) {
+        _logger.detail('\t$l');
+        errorMessages.add(l);
+      }).disposedBy(scope);
+      
+      // Capture stderr for error detection
+      process.listenStdErr((l) {
+        _logger.detail('\t$l');
+        errorMessages.add(l);
+      }).disposedBy(scope);
+
+      final exitCode = await process.exitCode;
+      patrolLogReader.stopTimer();
+      processLogs.kill();
+
+      // In develop mode, check if the runner timed out or failed
+      if (exitCode != 0) {
+        final errorOutput = errorMessages.join('\n');
+        
+        // Check for specific timeout errors that indicate restart should be attempted
+        final isTimeoutError = errorOutput.contains('test runner timed out') ||
+            errorOutput.contains('encountered an error') ||
+            errorOutput.contains('Lost connection') ||
+            errorOutput.contains('connection refused');
+        
+        if (isTimeoutError) {
+          task.fail('iOS test runner timed out or lost connection');
+          throw Exception(
+            'iOS test runner timed out or lost connection (exit code: $exitCode)',
+          );
+        }
+        
+        // For other non-zero exit codes in develop mode, just complete
+        task.complete('App shut down (exit code: $exitCode)');
+      } else {
+        task.complete('Completed executing $subject');
       }
     });
   }
