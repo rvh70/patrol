@@ -96,46 +96,45 @@ won't be re-executed on hot restarts.
 These cases are quite specific and it's hard to give advice without knowing the
 context.
 
+### Configuration
+
+#### iOS Test Runner Timeout
+
+On iOS, if you encounter "test runner timed out while preparing to run tests"
+errors, this typically indicates that the native test runner is taking too long
+to initialize. Common causes include:
+
+- **Port conflicts**: The test server (port 8081) or app server (port 8082) is already in use
+- **Slow simulator startup**: The iOS simulator is slow to boot or launch the app
+- **Network permission prompts**: The app requires network permissions that aren't granted
+
+**PATROL_IOS_TEST_RUNNER_TIMEOUT** (default: `600` seconds / 10 minutes)
+
+Configures the maximum time allowed for test execution in xcodebuild.
+This sets both the default and maximum execution time allowance for tests.
+
+```bash
+export PATROL_IOS_TEST_RUNNER_TIMEOUT=1200
+patrol develop --target patrol_test/example_test.dart
+```
+
+**Troubleshooting timeout errors:**
+
+1. Check if ports 8081 (test server) and 8082 (app server) are available:
+   ```bash
+   lsof -i :8081 -i :8082
+   ```
+
+2. Kill any processes using these ports:
+   ```bash
+   kill -9 $(lsof -t -i:8081)
+   kill -9 $(lsof -t -i:8082)
+   ```
+
+3. The CLI will warn you if ports are in use before starting tests
+
 See also:
 
 - [The difference between Hot Restart and Hot Reload in Flutter][so_question]
 
 [so_question]: https://stackoverflow.com/q/61787776/7009800
-
-### Configuration
-
-#### iOS Develop Mode Auto-Restart
-
-On iOS, the test runner process may occasionally timeout or lose connection,
-especially after extended develop sessions. Patrol automatically restarts
-the iOS test runner when this happens to keep your develop session alive.
-
-You can configure the restart behavior using environment variables:
-
-**PATROL_IOS_DEVELOP_MAX_RESTARTS** (default: `10`)
-
-Maximum number of times to restart the iOS test runner before giving up.
-Set to `0` to disable automatic restarts.
-
-```
-export PATROL_IOS_DEVELOP_MAX_RESTARTS=20
-patrol develop --target patrol_test/example_test.dart
-```
-
-**PATROL_IOS_DEVELOP_INITIAL_BACKOFF_MS** (default: `2000`)
-
-Initial delay in milliseconds before restarting the iOS test runner.
-Subsequent restarts use exponential backoff (capped at 30 seconds).
-
-```
-export PATROL_IOS_DEVELOP_INITIAL_BACKOFF_MS=5000
-patrol develop --target patrol_test/example_test.dart
-```
-
-These settings help handle transient issues like:
-- "Test runner timed out while preparing to run tests"
-- Connection failures between test runner and app
-- Xcode build process issues
-
-The automatic restart feature is designed to make `patrol develop` on iOS
-more robust during long development sessions.
